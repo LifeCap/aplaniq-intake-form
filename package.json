@@ -1,0 +1,10 @@
+{
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^9.1.5",
+    "nodemailer": "^9.0.5",
+    "pdf-lib": "^1.17.1"
+  }
+}
