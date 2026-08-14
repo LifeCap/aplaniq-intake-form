@@ -1,0 +1,9 @@
+node_modules/
+.netlify/
+.npm-cache/
+.playwright-browsers/
+test-results/
+.env
+.env.*
+!.env.example
+.gstack/

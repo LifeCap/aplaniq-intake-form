@@ -1,7 +1,8 @@
 [build]
   publish = "."
   functions = "netlify/functions"
-  [[redirects]]
+
+[[redirects]]
   from = "/"
   to = "/aplaniq_intake_form.html"
   status = 200

@@ -166,7 +166,7 @@ export default async function handler(request) {
 
   const submittedAt = new Date().toISOString();
   const auditId = createAuditId(new Date(submittedAt));
-  const recipient = process.env.INTAKE_RECIPIENT || 'troy@aplaniq.co';
+  const recipient = process.env.INTAKE_RECIPIENT || 'hello@aplaniq.co';
   const payloadHash = createHash('sha256').update(JSON.stringify(validation.data)).digest('hex');
   const store = getStore(AUDIT_STORE);
   const auditRecord = { auditId, submittedAt, submittedAtEastern: easternTime(submittedAt), companyName: validation.data.companyName, contactEmail: validation.data.contactEmail, recipient, status: 'received', payloadHash };
