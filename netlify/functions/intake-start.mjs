@@ -8,7 +8,10 @@ import {
   clientFolderName,
   createAuditId,
   jsonResponse,
+  logIntakeEvent,
+  missingEnvironment,
   normalizeFileName,
+  providerErrorClass,
   safeDriveName,
   validateIntakePayload,
 } from './intake-core.mjs';
@@ -17,11 +20,17 @@ const DRIVE_API = 'https://www.googleapis.com/drive/v3/files';
 const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3/files';
 const TOKEN_API = 'https://oauth2.googleapis.com/token';
 
-function requireGoogleConfig(env = process.env) {
-  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, GOOGLE_DRIVE_PARENT_FOLDER_ID } = env;
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN || !GOOGLE_DRIVE_PARENT_FOLDER_ID) {
+export function googleConfigStatus(env = process.env) {
+  const missing = missingEnvironment(env, ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN', 'GOOGLE_DRIVE_PARENT_FOLDER_ID']);
+  return { ready: missing.length === 0, missing };
+}
+
+export function requireGoogleConfig(env = process.env) {
+  const status = googleConfigStatus(env);
+  if (!status.ready) {
     throw new Error('Google Drive is not configured.');
   }
+  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, GOOGLE_DRIVE_PARENT_FOLDER_ID } = env;
   return { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, GOOGLE_DRIVE_PARENT_FOLDER_ID };
 }
 
@@ -123,63 +132,58 @@ export async function startIntake(payload, deps = {}) {
   const fetchImpl = deps.fetch || fetch;
   const env = deps.env || process.env;
   const store = deps.store || getStore(AUDIT_STORE);
-  const token = await refreshGoogleAccessToken(fetchImpl, env);
-  const yearFolder = await createDriveFolder(fetchImpl, token, String(now.getUTCFullYear()), env.GOOGLE_DRIVE_PARENT_FOLDER_ID);
-  const clientFolder = await createDriveFolder(fetchImpl, token, clientFolderName(validation.data, auditId), yearFolder.id);
-  const folderUrl = clientFolder.webViewLink || `https://drive.google.com/drive/folders/${clientFolder.id}`;
-  const folders = {
-    summary: await createDriveFolder(fetchImpl, token, '01 Intake Summary', clientFolder.id),
-    brand: await createDriveFolder(fetchImpl, token, '02 Brand Assets', clientFolder.id),
-    website: await createDriveFolder(fetchImpl, token, '03 Website Assets', clientFolder.id),
-    documents: await createDriveFolder(fetchImpl, token, '04 Documents', clientFolder.id),
-    references: await createDriveFolder(fetchImpl, token, '05 References', clientFolder.id),
-  };
-
   const files = validation.files.map((file) => ({ ...file, status: 'pending' }));
-  await createDriveJsonFile(fetchImpl, token, `${auditId}-summary.json`, folders.summary.id, buildSummaryJson(validation.data, auditId, submittedAt, folderUrl, files));
-
-  const uploadTargets = [];
-  for (let index = 0; index < files.length; index += 1) {
-    const file = files[index];
-    uploadTargets.push({
-      uploadId: `upload-${index + 1}`,
-      name: file.name,
-      size: file.size,
-      type: file.type,
-      category: file.category,
-      uploadUrl: await createUploadSession(fetchImpl, token, file, categoryFolderId(file, folders)),
-    });
-  }
-
   const intakeRecord = {
     auditId,
     submittedAt,
     data: validation.data,
     files,
-    folderId: clientFolder.id,
-    folderUrl,
-    folders: Object.fromEntries(Object.entries(folders).map(([key, folder]) => [key, folder.id])),
-    status: 'upload_pending',
+    folderId: null,
+    folderUrl: '',
+    folders: {},
+    uploadTargets: [],
+    drive: { status: 'pending', errorClass: null },
+    status: 'received',
     payloadHash: createHash('sha256').update(JSON.stringify({ data: validation.data, files })).digest('hex'),
   };
-  intakeRecord.uploadTargets = uploadTargets.map(({ uploadId, name, size, type, category, uploadUrl }) => ({
-    uploadId,
-    name,
-    size,
-    type,
-    category,
-    uploadUrl,
-    uploadedBytes: 0,
-    status: 'pending',
-  }));
   await store.set(auditId, JSON.stringify(intakeRecord));
 
-  return {
-    ok: true,
-    auditId,
-    folderUrl,
-    uploadTargets: uploadTargets.map(({ uploadUrl, ...target }) => target),
-  };
+  try {
+    const token = await refreshGoogleAccessToken(fetchImpl, env);
+    const yearFolder = await createDriveFolder(fetchImpl, token, String(now.getUTCFullYear()), env.GOOGLE_DRIVE_PARENT_FOLDER_ID);
+    const clientFolder = await createDriveFolder(fetchImpl, token, clientFolderName(validation.data, auditId), yearFolder.id);
+    const folderUrl = clientFolder.webViewLink || `https://drive.google.com/drive/folders/${clientFolder.id}`;
+    const folders = {
+      summary: await createDriveFolder(fetchImpl, token, '01 Intake Summary', clientFolder.id),
+      brand: await createDriveFolder(fetchImpl, token, '02 Brand Assets', clientFolder.id),
+      website: await createDriveFolder(fetchImpl, token, '03 Website Assets', clientFolder.id),
+      documents: await createDriveFolder(fetchImpl, token, '04 Documents', clientFolder.id),
+      references: await createDriveFolder(fetchImpl, token, '05 References', clientFolder.id),
+    };
+    await createDriveJsonFile(fetchImpl, token, `${auditId}-summary.json`, folders.summary.id, buildSummaryJson(validation.data, auditId, submittedAt, folderUrl, files));
+    const uploadTargets = [];
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      uploadTargets.push({ uploadId: `upload-${index + 1}`, name: file.name, size: file.size, type: file.type, category: file.category, uploadUrl: await createUploadSession(fetchImpl, token, file, categoryFolderId(file, folders)) });
+    }
+    Object.assign(intakeRecord, {
+      folderId: clientFolder.id,
+      folderUrl,
+      folders: Object.fromEntries(Object.entries(folders).map(([key, folder]) => [key, folder.id])),
+      uploadTargets: uploadTargets.map(({ uploadUrl, ...target }) => ({ ...target, uploadUrl, uploadedBytes: 0, status: 'pending' })),
+      drive: { status: 'ready', errorClass: null },
+      status: 'upload_pending',
+    });
+    await store.set(auditId, JSON.stringify(intakeRecord));
+    logIntakeEvent('intake_started', { auditId, stage: 'drive', driveStatus: 'ready' });
+    return { ok: true, auditId, folderUrl, uploadTargets: uploadTargets.map(({ uploadUrl, ...target }) => target), driveStatus: 'ready' };
+  } catch (error) {
+    intakeRecord.drive = { status: 'failed', errorClass: providerErrorClass(error) };
+    intakeRecord.status = 'drive_unavailable';
+    await store.set(auditId, JSON.stringify(intakeRecord));
+    logIntakeEvent('intake_drive_unavailable', { auditId, stage: 'drive', errorClass: intakeRecord.drive.errorClass });
+    return { ok: true, auditId, folderUrl: '', uploadTargets: [], driveStatus: 'failed' };
+  }
 }
 
 export default async function handler(request) {
@@ -199,6 +203,6 @@ export default async function handler(request) {
     return jsonResponse(200, result);
   } catch (error) {
     console.error('Unable to start intake.', error);
-    return jsonResponse(503, { error: 'Unable to prepare your upload folder. Please try again.' });
+    return jsonResponse(503, { error: 'We could not record your intake. Please try again.' });
   }
 }

@@ -103,6 +103,22 @@ export function jsonResponse(status, body) {
   });
 }
 
+export function missingEnvironment(env, names) {
+  return names.filter((name) => !text(env?.[name]));
+}
+
+export function providerErrorClass(error) {
+  const message = text(error?.message).toLowerCase();
+  if (message.includes('not configured') || message.includes('missing')) return 'configuration';
+  if (message.includes('authorize') || message.includes('auth') || message.includes('credential')) return 'authentication';
+  if (message.includes('timeout') || message.includes('network') || message.includes('fetch failed')) return 'network';
+  return 'provider';
+}
+
+export function logIntakeEvent(event, details = {}) {
+  console.info(JSON.stringify({ event, ...details }));
+}
+
 export function easternTime(isoTime) {
   return new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',

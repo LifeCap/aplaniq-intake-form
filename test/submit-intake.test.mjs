@@ -4,6 +4,7 @@ import { buildPdf, clientFolderName, createAuditId, validateFileManifest, valida
 import { startIntake } from '../netlify/functions/intake-start.mjs';
 import { completeIntake } from '../netlify/functions/intake-complete.mjs';
 import { uploadIntakeChunk } from '../netlify/functions/intake-upload.mjs';
+import { intakeHealth } from '../netlify/functions/intake-health.mjs';
 
 const validSubmission = {
   companyName: 'Acme LLC',
@@ -160,6 +161,59 @@ test('completes intake by storing status and emailing hello inbox', async () => 
   const record = JSON.parse(await store.get(auditId));
   assert.equal(record.status, 'delivered');
   assert.equal(record.files[0].status, 'uploaded');
+});
+
+test('continues with email-only delivery when Google Drive is unavailable', async () => {
+  const store = memoryStore();
+  const start = await startIntake(validSubmission, {
+    env: { ...env, GOOGLE_REFRESH_TOKEN: '' },
+    fetch: driveFetchMock(),
+    store,
+    now: new Date('2026-08-12T12:00:00.000Z'),
+    uuid: 'cccccccc-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+  });
+  assert.equal(start.ok, true);
+  assert.equal(start.driveStatus, 'failed');
+  assert.deepEqual(start.uploadTargets, []);
+
+  const sent = [];
+  const result = await completeIntake({ auditId: start.auditId, uploadedFiles: [] }, {
+    env: { ...env, GOOGLE_REFRESH_TOKEN: '' },
+    store,
+    transport: { sendMail: async (message) => { sent.push(message); return { messageId: 'msg-fallback' }; } },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(sent[0].to, 'hello@aplaniq.co');
+  const record = JSON.parse(await store.get(start.auditId));
+  assert.equal(record.status, 'delivered');
+  assert.equal(record.drive.status, 'failed');
+});
+
+test('records a clear delivery failure when SMTP cannot send', async () => {
+  const auditId = 'APL-20260812-BBBBBBBB';
+  const parsed = validateIntakePayload(validSubmission);
+  const store = memoryStore({
+    [auditId]: JSON.stringify({ auditId, submittedAt: '2026-08-12T12:00:00.000Z', data: parsed.data, files: parsed.files, folderUrl: '', folders: {}, drive: { status: 'failed', errorClass: 'configuration' } }),
+  });
+  const result = await completeIntake({ auditId, uploadedFiles: [] }, {
+    env,
+    store,
+    transport: { sendMail: async () => { throw new Error('SMTP authentication failed'); } },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 502);
+  const record = JSON.parse(await store.get(auditId));
+  assert.equal(record.status, 'delivery_failed');
+  assert.equal(record.deliveryErrorClass, 'authentication');
+});
+
+test('reports separate SMTP and Google configuration readiness', () => {
+  assert.deepEqual(intakeHealth({}), {
+    ok: false,
+    smtp: { ready: false, missing: ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASSWORD'] },
+    googleDrive: { ready: false, missing: ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN', 'GOOGLE_DRIVE_PARENT_FOLDER_ID'] },
+  });
+  assert.equal(intakeHealth(env).ok, true);
 });
 
 test('uploads a chunk through the Netlify proxy and stores file metadata', async () => {

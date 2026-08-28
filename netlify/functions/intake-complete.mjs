@@ -6,14 +6,22 @@ import {
   buildPdf,
   buildSummaryJson,
   jsonResponse,
+  logIntakeEvent,
+  missingEnvironment,
   normalizeFileName,
+  providerErrorClass,
   text,
 } from './intake-core.mjs';
 import { createDriveJsonFile, refreshGoogleAccessToken } from './intake-start.mjs';
 
 const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3/files';
 
-function smtpTransport(env = process.env) {
+export function smtpConfigStatus(env = process.env) {
+  const missing = missingEnvironment(env, ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASSWORD']);
+  return { ready: missing.length === 0, missing };
+}
+
+export function smtpTransport(env = process.env) {
   const { SMTP_HOST, SMTP_PORT = '465', SMTP_USER, SMTP_PASSWORD } = env;
   if (!SMTP_HOST || !SMTP_USER || !SMTP_PASSWORD) throw new Error('SMTP is not configured.');
   return nodemailer.createTransport({
@@ -99,13 +107,22 @@ export async function completeIntake(payload, deps = {}) {
 
   let summaryFile = null;
   let pdfFile = null;
+  let drive = record.drive || { status: record.folders?.summary ? 'ready' : 'unavailable', errorClass: null };
   if (record.folders?.summary) {
-    const token = await refreshGoogleAccessToken(fetchImpl, env);
-    summaryFile = await createDriveJsonFile(fetchImpl, token, `${auditId}-completed-summary.json`, record.folders.summary, buildSummaryJson(record.data, auditId, submittedAt, record.folderUrl, files));
-    pdfFile = await createDriveBinaryFile(fetchImpl, token, `aplaniq-intake-${auditId}.pdf`, record.folders.summary, pdf, 'application/pdf');
+    try {
+      const token = await refreshGoogleAccessToken(fetchImpl, env);
+      summaryFile = await createDriveJsonFile(fetchImpl, token, `${auditId}-completed-summary.json`, record.folders.summary, buildSummaryJson(record.data, auditId, submittedAt, record.folderUrl, files));
+      pdfFile = await createDriveBinaryFile(fetchImpl, token, `aplaniq-intake-${auditId}.pdf`, record.folders.summary, pdf, 'application/pdf');
+      drive = { status: 'completed', errorClass: null };
+    } catch (error) {
+      drive = { status: 'failed', errorClass: providerErrorClass(error) };
+      logIntakeEvent('intake_drive_completion_failed', { auditId, stage: 'drive', errorClass: drive.errorClass });
+    }
   }
 
-  const result = await (deps.transport || smtpTransport(env)).sendMail({
+  let result;
+  try {
+    result = await (deps.transport || smtpTransport(env)).sendMail({
     from: env.SMTP_FROM || env.SMTP_USER,
     to: recipient,
     replyTo: record.data.contactEmail,
@@ -120,7 +137,13 @@ export async function completeIntake(payload, deps = {}) {
       `Uploaded files: ${files.length}`,
     ].join('\n'),
     attachments: [{ filename: `aplaniq-intake-${auditId}.pdf`, content: Buffer.from(pdf), contentType: 'application/pdf' }],
-  });
+    });
+  } catch (error) {
+    const failedRecord = { ...record, files, drive, status: 'delivery_failed', completedAt: new Date().toISOString(), recipient, deliveryErrorClass: providerErrorClass(error) };
+    await store.set(auditId, JSON.stringify(failedRecord));
+    logIntakeEvent('intake_email_failed', { auditId, stage: 'email', recipient, errorClass: failedRecord.deliveryErrorClass });
+    return { ok: false, status: 502, error: 'We could not send your intake email. Please try again shortly.' };
+  }
 
   const completedRecord = {
     ...record,
@@ -128,13 +151,15 @@ export async function completeIntake(payload, deps = {}) {
     status: 'delivered',
     completedAt: new Date().toISOString(),
     recipient,
+    drive,
     summaryFile,
     pdfFile,
     emailMessageId: result.messageId || null,
   };
   await store.set(auditId, JSON.stringify(completedRecord));
+  logIntakeEvent('intake_delivered', { auditId, stage: 'email', recipient, driveStatus: drive.status });
 
-  return { ok: true, auditId, folderUrl: record.folderUrl };
+  return { ok: true, auditId, folderUrl: record.folderUrl, driveStatus: drive.status };
 }
 
 export default async function handler(request) {
@@ -154,6 +179,6 @@ export default async function handler(request) {
     return jsonResponse(200, result);
   } catch (error) {
     console.error('Unable to complete intake.', error);
-    return jsonResponse(502, { error: 'We could not finish your intake. Please try again shortly.' });
+    return jsonResponse(502, { error: 'We could not send your intake email. Please try again shortly.' });
   }
 }

@@ -3,7 +3,9 @@ import {
   AUDIT_STORE,
   UPLOAD_CHUNK_BYTES,
   jsonResponse,
+  logIntakeEvent,
   normalizeFileName,
+  providerErrorClass,
   text,
 } from './intake-core.mjs';
 
@@ -125,6 +127,8 @@ export default async function handler(request) {
     });
   } catch (error) {
     console.error('Unable to upload intake file chunk.', error);
+    const auditId = text(new URL(request.url).searchParams.get('auditId'));
+    logIntakeEvent('intake_upload_failed', { auditId, stage: 'upload', errorClass: providerErrorClass(error) });
     return jsonResponse(502, { error: 'We could not upload that file chunk. Please try again.' });
   }
 }

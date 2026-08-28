@@ -1,6 +1,6 @@
 # APLANIQ website intake delivery
 
-The intake form creates a client package for website builds, website repair, and marketing deliverables. It starts a Google Drive intake folder, uploads client files directly to Drive with resumable upload sessions, then emails `hello@aplaniq.co` a PDF summary and Drive folder link through SpaceMail SMTP.
+The intake form creates a client package for website builds, website repair, and marketing deliverables. It records the intake first, then attempts Google Drive packaging and emails `hello@aplaniq.co` a PDF summary through SpaceMail SMTP. If Google Drive is unavailable, the intake email still sends and the audit record captures the Drive failure.
 
 ## Netlify setup
 
@@ -33,6 +33,8 @@ APLANIQ Intakes/{YYYY}/{APL-YYYYMMDD-XXXXXXXX - Company Name}/
 ```
 
 The audit records live in the `aplaniq-intake-audit` Netlify Blob store. Each record has an ID, timestamp, Drive folder URL, delivery status, SpaceMail message ID, uploaded file statuses, and a SHA-256 hash of the submitted payload.
+
+`/.netlify/functions/intake-health` reports whether the SMTP and Google Drive environment variable sets are configured. It intentionally returns readiness and missing variable names only, never secret values.
 
 ## File policy
 

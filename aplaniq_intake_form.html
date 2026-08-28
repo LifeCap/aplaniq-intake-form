@@ -1072,7 +1072,7 @@
       const submitButton = document.getElementById('submitBtn');
       submitButton.disabled = true;
       submitButton.textContent = 'Preparing...';
-      showStatus('Creating your secure intake folder...');
+      showStatus('Recording your intake...');
 
       try {
         const startResponse = await fetch('/.netlify/functions/intake-start', {
@@ -1081,10 +1081,13 @@
           body: JSON.stringify(formPayload()),
         });
         const startResult = await startResponse.json().catch(() => ({}));
-        if (!startResponse.ok) throw new Error(startResult.error || 'Unable to create your intake folder.');
+        if (!startResponse.ok) throw new Error(startResult.error || 'We could not record your intake. Please try again.');
 
+        const driveUnavailable = startResult.driveStatus === 'failed';
+        if (driveUnavailable) showStatus('Drive storage is unavailable. We will email your intake details, but your files could not be saved.');
+        else if ((startResult.uploadTargets || []).length) showStatus('Uploading your files...');
         const uploadedFiles = await uploadFiles(startResult.auditId, startResult.uploadTargets || []);
-        showStatus('Finalizing your intake package...');
+        showStatus('Sending your intake email...');
 
         const completeResponse = await fetch('/.netlify/functions/intake-complete', {
           method: 'POST',
@@ -1092,12 +1095,13 @@
           body: JSON.stringify({ auditId: startResult.auditId, uploadedFiles }),
         });
         const completeResult = await completeResponse.json().catch(() => ({}));
-        if (!completeResponse.ok) throw new Error(completeResult.error || 'Unable to finalize your intake.');
+        if (!completeResponse.ok) throw new Error(completeResult.error || 'Email delivery failed. Please try again shortly.');
 
         form.style.display = 'none';
         document.getElementById('successMessage').classList.add('show');
         const folderWrap = document.getElementById('folderLinkWrap');
         if (completeResult.folderUrl) folderWrap.innerHTML = `<a href="${completeResult.folderUrl}" target="_blank" rel="noopener noreferrer">View intake folder</a>`;
+        else folderWrap.textContent = 'Your intake was emailed to the APLANIQ team.';
         clearStatus();
         document.getElementById('successMessage').focus();
       } catch (error) {
